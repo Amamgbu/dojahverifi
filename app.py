@@ -10,8 +10,11 @@ app = Flask(__name__)
 
 @app.route('/')
 def root_route():
-    dynamodb.CreateTableVerification()
-    return "Created"
+    try:
+        dynamodb.CreateTableVerification()
+        return "Table created"
+    except:
+        return "Table existing"
 
 
 
