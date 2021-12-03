@@ -1,12 +1,45 @@
 from logging import debug
 from types import resolve_bases
+from typing_extensions import Required
 from flask import Flask, request, jsonify
 import os
 import base64
 import boto3
+import botocore
 import dynamodb_handler as dynamodb
+from flask_restx import Api,Resource, fields
+
 
 app = Flask(__name__)
+api = Api(app, version='1.0',title="Liveness Check API",
+        description =  "Verify the liveness of an indiviual"
+)
+
+
+ns = api.namespace('', description="Liveness Check API")
+
+checker = api.model('Checker', {
+    'param': fields.String(required=True, enum=['face','mouthOpen','mouthClose','id']),
+    'image': fields.String(required=True, description='base64 string of the image to check')
+})
+
+res_data =  api.model('Res', {
+    'match': fields.Boolean(description='Result of the image validation')
+})
+
+checker_res = api.model('Checker_res', {
+    'entity': fields.Nested(res_data, description= 'The response from operation')
+})
+
+error_model =  api.model('error_model', {
+    'error': fields.String,
+})
+
+parser = api.parser()
+parser.add_argument('image', type=str, required=True, help='The base64 string of the image,',location='json')
+parser.add_argument('session_id', type=str, required=True, help='The Session Id,',location='json')
+parser.add_argument('app_id', type=str, required=True, help='The App id,',location='json')
+parser.add_argument('param', type=str, required=True, help='face|mouthOpen|mouthClose|id,',location='json')
 
 @app.route('/')
 def root_route():
@@ -17,26 +50,68 @@ def root_route():
         return "Table existing"
 
 
+@api.errorhandler
+def default_error_handler(e):
+    message = 'An error occurred from our end, we are on it'
 
-@app.route('/verify',methods=['GET'])
-def verify():
-    if request.method == 'GET':
+    return {'error': message, 'trace': str(e)},500
+
+
+@ns.route('/verify' )
+class Verification(Resource):
+    """ Gets the verification result associated with the session_id """
+
+    @api.doc(params= {'session_id': 'The session Id'})
+    @api.response(400, 'Bad request',error_model)
+    @api.response(200,'Success', checker_res)
+    def get(self):
+        """Gets the verification result associated with the session_id """
+
+        
         session_id  = ""
         try:
             session_id = request.args.get('session_id')
+
+            if not session_id:
+                response  = {"error": "The parameter session_id is missing"}
+                return response,400
         except Exception as e:
-            response  = {"error": "There appears to be an error with the paramters in your request", "trace": str(e)}
-            return jsonify(response),400
-        
+            response  = {"error": "The parameter session_id is missing"}
+            return response,400
+            
         try:
             client = boto3.client(
                 'rekognition',
-              region_name =os.environ.get("REGION_NAME"),
-              aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID"),
-              aws_secret_access_key= os.environ.get("AWS_SECRET_ACCESS_KEY")
+            region_name =os.environ.get("REGION_NAME"),
+            aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key= os.environ.get("AWS_SECRET_ACCESS_KEY")
             )
 
+            s3  =  boto3.resource('s3')
+
+
             
+            try:
+                s3.Object('dojah-image-rekognition',session_id + 'face' +'.jpeg').load()
+            except botocore.exceptions.ClientError as e:
+                if e.response['Error']['Code'] == "404":
+                    response =  {'error': 'No face data found for this session, please retry verification again'}
+                    return response,400
+                else:
+                    response  = {'error': str(e)}
+                    return response,400
+            
+            try:
+                s3.Object('dojah-image-rekognition',session_id + 'id' +'.jpeg').load()
+            except botocore.exceptions.ClientError as e:
+                if e.response['Error']['Code'] == "404":
+                    response =  {'error': 'No ID data found for this session, please retry verification'}        
+                    return response,400
+                else:
+                    response  = {'error': str(e)}
+                    return response,400
+
+
             result  = compare_faces(client, session_id)
             bucket_name = 'dojah-image-rekognition'
             file_name  =  session_id + 'id' + '.jpeg'
@@ -45,56 +120,76 @@ def verify():
             if result:
                 dynamodb.update(session_id,object_url,'Completed')
 
-            response =  {'match': result}
-
-            return jsonify(response)
+            response =  {'entity': {'match': result} }
+            return response,200
         except Exception as e:
-            response =  {'error': 'An error occured', 'trace': str(e)}
+            response =  {'error': str(e)}
 
-            return jsonify(response),500
+            
+            return response,500
 
-@app.route('/check',methods=['POST'])
-def check():
-    if request.method == 'POST':
+
+
+@ns.route('/check' )
+class Check(Resource):
+    """validate the image request """
+
+
+    @api.doc(parser=parser)
+    @ns.expect(checker)
+    @api.response(400, 'Bad request',error_model)
+    @api.response(200, 'Success', checker_res)
+    def post(self):
+
         imgstring =""
         param = ""
 
         try:
-            data = request.get_json(force=True)
+            try:
+                data = request.get_json(force=True)
+            except Exception as e:
+                return {"error": str(e)}
             imgstring =  data['image']
             param  =  data['param']
             session_id = data['session_id']
             app_id = data['app_id']
         except Exception as e:
-            response  = {"error": "There appears to be an error with the paramters in your request", "trace": str(e)}
-            return jsonify(response),400
+            response  = {"error": "The parameter {} is missing".format(str(e))}
+            return response,400
         
         imgdata =  None
+
+        params = ['face','id','mouthOpen','mouthClose']
+
+        if param not in params:
+            response  = {"error": "Param should be one of face | id | mouthOpen | mouthClose"}
+
+            return response,400
 
         try:
             imgdata =  base64.b64decode(str(imgstring))
         except Exception as e:
-            response = {"error": "Error decoding the base64 string, please check and try again", "trace": str(e)}
-            return jsonify(response),400
+            response = {"error": "Error decoding the base64 string, please check the string and try again"}
+            return response,400
         
 
         try:
             client = boto3.client(
                 'rekognition',
-              region_name =os.environ.get("REGION_NAME"),
-              aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID"),
-              aws_secret_access_key= os.environ.get("AWS_SECRET_ACCESS_KEY")
+            region_name =os.environ.get("REGION_NAME"),
+            aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key= os.environ.get("AWS_SECRET_ACCESS_KEY")
             )
 
             
             result  = detectface(client,imgdata,param,session_id,app_id)
-            response =  {'match': result}
+            response =  {'entity': {'match': result}}
 
-            return jsonify(response)
+            return response,200
         except Exception as e:
-            response =  {'error': 'An error occured', 'trace': str(e)}
+            response =  {'error': str(e)}
 
-            return jsonify(response),500
+            return response,400
         
 
 def upload(imagedata,session_id,id):
@@ -171,6 +266,7 @@ def detect_id(client, imagedata, session_id, app_id):
 
 def compare_faces(client,session_id):
     """ """
+
     resp = client.compare_faces(
         SourceImage={
             'S3Object':{
