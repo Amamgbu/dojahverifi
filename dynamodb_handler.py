@@ -35,15 +35,21 @@ def CreateTableVerification():
 
 LiveTable  = resource.Table('Liveness_demo')
     
-def addItemToLiveNess(session_id, app_id, face_url, id_url, body):
+def addItemToLiveNess(session_id, app_id, face_url, id_url, body,f_confidence):
         response  =  LiveTable.put_item(
             Item = {
                 'session_id': session_id,
                 'app_id': app_id,
                 'url':  face_url,
                 'id_url': id_url,
-                'body': "body",
-                'status': 'started'
+                'body': body,
+                'status': 'started',
+                'open' : False,
+                'close': False,
+                'o_confidence': 0,
+                'c_confidence': 0,
+                'i_confidence': 0,
+                'f_confidence': f_confidence
             }
         )
 
@@ -55,7 +61,7 @@ def get(session_id):
                 'session_id': session_id
             },
             AttributesToGet= [
-                'url'
+                'f_confidence', 'i_confidence'
             ]
         )
 
@@ -64,7 +70,24 @@ def get(session_id):
                 return response['Item']
 
         return response
-def update(session_id, id_url, status):
+
+def update_confidence(session_id,param,value):
+    response  = LiveTable.update_item(
+        Key =  {
+            'session_id': session_id
+        },
+        AttributeUpdates = {
+            param : {
+                'Value': value,
+                'Action': 'PUT'
+            }
+        },
+
+        ReturnValues = "UPDATED_NEW"
+    )
+
+    return response
+def update(session_id, id_url, status,):
         response  =  LiveTable.update_item(
             Key = {
                 'session_id': session_id

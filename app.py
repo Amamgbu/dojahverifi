@@ -29,6 +29,11 @@ res_data =  api.model('Res', {
     'match': fields.Boolean(description='Result of the image validation')
 })
 
+ver_data =  api.model('Ver', {
+    'match': fields.Boolean(description='Result of the image validation'),
+    'confidence_value': fields.Integer()
+})
+
 checker_res = api.model('Checker_res', {
     'entity': fields.Nested(res_data, description= 'The response from operation')
 })
@@ -63,7 +68,7 @@ def default_error_handler(e):
 class Verification(Resource):
     """ Gets the verification result associated with the session_id """
 
-    @api.doc(params= {'session_id': 'The session Id'})
+    @api.doc(params= {'session_id': 'The session Id', 'id': 'Indicates if validation should include ID'})
     @api.response(400, 'Bad request',error_model)
     @api.response(200,'Success', checker_res)
     def get(self):
@@ -71,9 +76,10 @@ class Verification(Resource):
 
         
         session_id  = ""
+        param_id =  ""
         try:
             session_id = request.args.get('session_id')
-
+            param_id =  request.args.get('id')
             if not session_id:
                 response  = {"error": "The parameter session_id is missing"}
                 return response,400
@@ -89,34 +95,72 @@ class Verification(Resource):
             aws_secret_access_key= os.environ.get("AWS_SECRET_ACCESS_KEY")
             )
 
-            
+            if param_id is None:
+                param_id = False
+            elif param_id.lower() == 'true':
+                param_id = True
+            else:
+                param_id = False
+
           # verify image exists
-            id_resp = self.load_image('id',session_id)
+            id_resp = self.load_image('id',session_id) if param_id else None
             face_resp =  self.load_image('face',session_id)
 
-            if id_resp is not True:
+
+
+            if param_id and id_resp is not True:
                 return id_resp, 400
             
             if face_resp is not True:
                 return face_resp,400
 
-
-            result  = compare_faces(client, session_id)
+            result = None
+            if param_id:
+                result  = compare_faces(client, session_id)
 
             images =self.get_images(session_id)
           
             if result:
                 dynamodb.update(session_id,images['id'],'Completed')
 
+            confidences  =  dynamodb.get(session_id)
+
             
+            id = {
+                    'url': images['id'],
+                    'confidence_value': float(confidences['i_confidence'])
+            } if param_id else []
+
+            o_confidence  = 0
+
+            if not param_id:
+                o_confidence = float(confidences['f_confidence'])
+            elif  result == False:
+                o_confidence = 0
+            elif result['Similarity']:
+                o_confidence=  result['Similarity']
+
+
+            
+            
+
+
+
+
             res = {
-                'entity': {
-                    'match' : result if result is False else True,
-                    'confidence_value':  0 if result is False else result['Similarity'],
-                    'id_url' : images['id'],
-                    'face_url': images['face']
+                'entity' : {
+                    'person': {
+                        'url': images['face'],
+                        'confidence_value': float(confidences['f_confidence'])
+                    },
+                    'id': id,
+                    'overall':{
+                        'confidence_value': o_confidence,
+                       
+                    }
                 }
             }
+            
 
             
             return res,200
@@ -214,7 +258,7 @@ class Check(Resource):
 
             return response,200
         except Exception as e:
-            response =  {'error': "An error occured during the check process, please try again"}
+            response =  {'error': str(e)}
 
             return response,400
         
@@ -259,11 +303,12 @@ def detectface(client, imagedata, param, session_id,app_id):
         resp =  not a
     
     #write to database if resp = True
-
+    import json
+    from decimal import Decimal
    
     if resp and param == 'face':
         url = upload(imagedata,session_id=session_id,id="face")
-        dynamodb.addItemToLiveNess(session_id,app_id,url,"",result)
+        dynamodb.addItemToLiveNess(session_id,app_id,url,"",json.loads(json.dumps(result),parse_float=Decimal), Decimal(str(result['FaceDetails'][0]['Confidence'])))
 
     return resp
 def detect_id(client, imagedata, session_id, app_id):
@@ -274,8 +319,14 @@ def detect_id(client, imagedata, session_id, app_id):
     
     count  = 0
     names  = []
+    confidence = 0
     for label in response["Labels"]:
         names.append(label['Name'])
+        confidence = confidence + label['Confidence']
+
+    div =  len(response['Labels']) if len(response['Labels']) > 0 else 1
+    confidence =  confidence / div
+
     
     if "Id Cards" in names or "Document" in names:
         count = count + 1
@@ -286,8 +337,9 @@ def detect_id(client, imagedata, session_id, app_id):
     if "Text" in names:
         count = count + 1
     
-    
+    from decimal import Decimal
     if count == 3:
+        dynamodb.update_confidence(session_id,'i_confidence',Decimal(str(confidence)))
         upload(imagedata,session_id,"id")
         return True
     else:
