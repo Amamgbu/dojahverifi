@@ -4,6 +4,8 @@ from typing_extensions import Required
 from flask import Flask, request, jsonify
 import os
 import base64
+
+from flask.json import load
 import boto3
 import botocore
 import dynamodb_handler as dynamodb
@@ -87,46 +89,71 @@ class Verification(Resource):
             aws_secret_access_key= os.environ.get("AWS_SECRET_ACCESS_KEY")
             )
 
-            s3  =  boto3.resource('s3')
-
-
             
-            try:
-                s3.Object('dojah-image-rekognition',session_id + 'face' +'.jpeg').load()
-            except botocore.exceptions.ClientError as e:
-                if e.response['Error']['Code'] == "404":
-                    response =  {'error': 'No face data found for this session, please retry verification again'}
-                    return response,400
-                else:
-                    response  = {'error': str(e)}
-                    return response,400
+          # verify image exists
+            id_resp = self.load_image('id',session_id)
+            face_resp =  self.load_image('face',session_id)
+
+            if id_resp is not True:
+                return id_resp, 400
             
-            try:
-                s3.Object('dojah-image-rekognition',session_id + 'id' +'.jpeg').load()
-            except botocore.exceptions.ClientError as e:
-                if e.response['Error']['Code'] == "404":
-                    response =  {'error': 'No ID data found for this session, please retry verification'}        
-                    return response,400
-                else:
-                    response  = {'error': str(e)}
-                    return response,400
+            if face_resp is not True:
+                return face_resp,400
 
 
             result  = compare_faces(client, session_id)
-            bucket_name = 'dojah-image-rekognition'
-            file_name  =  session_id + 'id' + '.jpeg'
-            location= boto3.client('s3').get_bucket_location(Bucket=bucket_name)['LocationConstraint']
-            object_url = "https://%s.s3-%s.amazonaws.com/%s" % (bucket_name,location, file_name)
-            if result:
-                dynamodb.update(session_id,object_url,'Completed')
 
-            response =  {'entity': {'match': result} }
-            return response,200
+            images =self.get_images(session_id)
+          
+            if result:
+                dynamodb.update(session_id,images['id'],'Completed')
+
+            
+            res = {
+                'entity': {
+                    'match' : result if result is False else True,
+                    'confidence_value':  0 if result is False else result['Similarity'],
+                    'id_url' : images['id'],
+                    'face_url': images['face']
+                }
+            }
+
+            
+            return res,200
         except Exception as e:
-            response =  {'error': str(e)}
+            response =  {'error': "An error occurred while verifiying, please try again"}
 
             
             return response,500
+
+    
+    def get_images(self, session_id):
+        bucket_name = 'dojah-image-rekognition'
+        file_name  =  session_id + 'id' + '.jpeg'
+        face_name = session_id + 'face' + '.jpeg'
+        location= boto3.client('s3').get_bucket_location(Bucket=bucket_name)['LocationConstraint']
+        object_url = "https://%s.s3-%s.amazonaws.com/%s" % (bucket_name,location, file_name)
+        face_url = "https://%s.s3-%s.amazonaws.com/%s" % (bucket_name,location, face_name)
+
+        return {'face': face_url, 'id': object_url}
+    
+    def load_image(self,param, session_id):
+        try:
+            s3  =  boto3.resource('s3')
+            s3.Object('dojah-image-rekognition',session_id + param +'.jpeg').load()
+            return True
+        except botocore.exceptions.ClientError as e:
+            if e.response['Error']['Code'] == "404":
+                response =  {'error': 'No {} data found for this session, please retry verification again'.format(param)}
+                return response
+            else:
+                response  = {'error': "An error occurred while retrieving the {} data, please  re-try verification".format(param)}
+                return response
+        
+
+        
+            
+            
 
 
 
@@ -187,7 +214,7 @@ class Check(Resource):
 
             return response,200
         except Exception as e:
-            response =  {'error': str(e)}
+            response =  {'error': "An error occured during the check process, please try again"}
 
             return response,400
         
@@ -221,6 +248,8 @@ def detectface(client, imagedata, param, session_id,app_id):
         Attributes = Attributes
     )
 
+    if len(result['FaceDetails']) == 0:
+        return False;
     if param ==  'face' and result['FaceDetails'] :
         resp =  True
     if param == 'mouthOpen':
@@ -282,12 +311,12 @@ def compare_faces(client,session_id):
         }
     )
 
-    if resp['FaceMatches']:
-        return True
+    if resp['FaceMatches'] and len(resp['FaceMatches']) > 0:
+        return resp['FaceMatches'][0]
     else:
         return False
 
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT',5000))
-    app.run(host='0.0.0.0',port=port,debug=True)
+    app.run(host='0.0.0.0',port=port)
