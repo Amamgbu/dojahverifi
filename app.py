@@ -129,7 +129,7 @@ class Verification(Resource):
             id = {
                     'url': images['id'],
                     'confidence_value': float(confidences['i_confidence'])
-            } if param_id else []
+            } if param_id else {}
 
             o_confidence  = 0
 
