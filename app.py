@@ -75,7 +75,7 @@ parser.add_argument('param', type=str, required=True, help='face|mouthOpen|mouth
 #Parser for /match
 
 m_parser  =  api.parser()
-m_parser.add_argument('selfies',type=bool, required=False,help='Indicates selfies only')
+m_parser.add_argument('selfies',type=bool, required=False,help='Indicates selfies only', location='json')
 m_parser.add_argument('selfie_image', type=str, required=True, help='The base 64 string og the selfie image', location='json')
 m_parser.add_argument('photoid_image', type=str, required=True, help= 'The base 64 string of the photo id image',location='json')
 
