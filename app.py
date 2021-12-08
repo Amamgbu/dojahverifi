@@ -6,6 +6,7 @@ import os
 import base64
 
 from flask.json import load
+from flask.wrappers import Response
 import boto3
 import botocore
 import dynamodb_handler as dynamodb
@@ -25,9 +26,18 @@ checker = api.model('Checker', {
     'image': fields.String(required=True, description='base64 string of the image to check')
 })
 
+matcher = api.model('Match', {
+    'selfie_image': fields.String(required=True, description='base64 string of the selfie image'),
+    'photoid_image': fields.String(required=True, description='base64 string of the photo id')
+})
+
+
+
 res_data =  api.model('Res', {
     'match': fields.Boolean(description='Result of the image validation')
 })
+
+
 
 ver_data =  api.model('Ver', {
     'match': fields.Boolean(description='Result of the image validation'),
@@ -42,11 +52,33 @@ error_model =  api.model('error_model', {
     'error': fields.String,
 })
 
+m_data  = api.model('Mat', {
+    'match': fields.Boolean(description='Result of the image validation'),
+    'confidence_value': fields.Integer()
+})
+
+m_data_selfie = api.model('Mat_selfie',{
+    'selfie': fields.Nested(m_data, description='The response of the data')
+})
+
+m_data_selfie_res =  api.model('Mat_selfie_res', {
+    'entity': fields.Nested(m_data_selfie, description = 'Response')
+})
+
+# Parser for /check
 parser = api.parser()
 parser.add_argument('image', type=str, required=True, help='The base64 string of the image,',location='json')
 parser.add_argument('session_id', type=str, required=True, help='The Session Id,',location='json')
 parser.add_argument('app_id', type=str, required=True, help='The App id,',location='json')
 parser.add_argument('param', type=str, required=True, help='face|mouthOpen|mouthClose|id,',location='json')
+
+#Parser for /match
+
+m_parser  =  api.parser()
+m_parser.add_argument('selfies',type=bool, required=False,help='Indicates selfies only')
+m_parser.add_argument('selfie_image', type=str, required=True, help='The base 64 string og the selfie image', location='json')
+m_parser.add_argument('photoid_image', type=str, required=True, help= 'The base 64 string of the photo id image',location='json')
+
 
 @app.route('/')
 def root_route():
@@ -64,6 +96,7 @@ def default_error_handler(e):
     return {'error': message, 'trace': str(e)},500
 
 
+    
 @ns.route('/verify' )
 class Verification(Resource):
     """ Gets the verification result associated with the session_id """
@@ -198,7 +231,82 @@ class Verification(Resource):
         
             
             
+@ns.route('/match')
+class Match(Resource):
+    """ Finds a match between two images - selfie vs passport """
 
+    @api.doc(parser=m_parser)
+    @ns.expect(matcher)
+    @api.response(400, 'Bad request',error_model)
+    @api.response(200, 'Success', m_data_selfie_res)
+
+    def post(self):
+        selfie = ""
+        photo = ""
+
+
+        try:
+            try:
+                data  =  request.get_json(force=True)
+            except Exception as e:
+                return {'error': "An error occurred while passing your input, please make sure your request is JSON formatted"},400
+            
+            selfie =  data['selfie_image']
+            photo =  data['photoid_image']
+        except Exception as e:
+            response =  {"error": "The parameter {} is missing".format(str(e))}
+
+            return response, 400
+        
+        selfie_data =  None
+        photo_data = None
+
+
+        try:
+            selfie_data =  base64.b64decode(str(selfie))
+            photo_data =  base64.b64decode(str(photo))
+        except Exception as e:
+            response = {"error": "Error decoding the base64 string, please check the string and try again"}
+            return response,400
+
+        try:
+            client = boto3.client(
+                'rekognition',
+            region_name =os.environ.get("REGION_NAME"),
+            aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key= os.environ.get("AWS_SECRET_ACCESS_KEY")
+            ) 
+
+
+            resp =  client.compare_faces(
+                SourceImage={  'Bytes': selfie_data},
+                TargetImage= {'Bytes': photo_data}
+
+            )
+
+            m_res = False
+            m_confidence  = 0
+            if resp['FaceMatches'] and len(resp['FaceMatches']) > 0:
+                m_res = True
+                m_confidence = resp['FaceMatches'][0]['Similarity']
+
+            else:
+                m_res = False
+                m_confidence = 0
+            
+            res =  {
+                'entity': {
+                    'selfie': {
+                        'match': m_res,
+                         'confidence_value': m_confidence
+                    }
+                   
+                }
+            }
+
+            return res
+        except Exception as e:
+            return {'error': str(e)},400
 
 
 @ns.route('/check' )
@@ -219,7 +327,7 @@ class Check(Resource):
             try:
                 data = request.get_json(force=True)
             except Exception as e:
-                return {"error": str(e)}
+                return {'error': "An error occurred while passing your input, please make sure your request is JSON formatted"},400
             imgstring =  data['image']
             param  =  data['param']
             session_id = data['session_id']
