@@ -400,8 +400,10 @@ def detectface(client, imagedata, param, session_id,app_id):
         Attributes = Attributes
     )
 
-    if len(result['FaceDetails']) == 0:
+    if len(result['FaceDetails']) != 1:
         return False;
+
+    
     if param ==  'face' and result['FaceDetails'] :
         resp =  True
     if param == 'mouthOpen':
@@ -426,10 +428,10 @@ def detect_id(client, imagedata, session_id, app_id):
     )
     
     count  = 0
-    names  = []
+    names  = {}
     confidence = 0
     for label in response["Labels"]:
-        names.append(label['Name'])
+        names[label['Name']] = label['Confidence']
         confidence = confidence + label['Confidence']
 
     div =  len(response['Labels']) if len(response['Labels']) > 0 else 1
@@ -438,9 +440,14 @@ def detect_id(client, imagedata, session_id, app_id):
     
     if "Id Cards" in names or "Document" in names:
         count = count + 1
+        if names['Id Cards'] < 90 or names['Document'] < 90:
+            return False
     
     if "Human" in names or "Person" in names:
         count = count +1
+
+        if names['Person'] < 90:
+            return False
     
     if "Text" in names:
         count = count + 1
