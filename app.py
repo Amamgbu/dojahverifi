@@ -1,16 +1,18 @@
-from logging import debug
-from types import resolve_bases
-from typing_extensions import Required
 from flask import Flask, request, jsonify
 import os
 import base64
 
-from flask.json import load
-from flask.wrappers import Response
 import boto3
 import botocore
 import dynamodb_handler as dynamodb
 from flask_restx import Api,Resource, fields
+
+import sentry_sdk
+
+from sentry_sdk.integrations.flask import FlaskIntegration
+from sentry_sdk import capture_exception
+
+
 
 
 app = Flask(__name__)
@@ -255,6 +257,7 @@ class Match(Resource):
             photo =  data['photoid_image']
         except Exception as e:
             response =  {"error": "The parameter {} is missing".format(str(e))}
+            #capture_exception(e)
 
             return response, 400
         
@@ -267,6 +270,7 @@ class Match(Resource):
             photo_data =  base64.b64decode(str(photo))
         except Exception as e:
             response = {"error": "Error decoding the base64 string, please check the string and try again"}
+            #capture_exception(e)
             return response,400
 
         try:
@@ -306,7 +310,8 @@ class Match(Resource):
 
             return res
         except Exception as e:
-            return {'error': str(e)},400
+            #capture_exception(e)
+            return {'error': "An error occurred while completing your request, Please try again"},400
 
 
 @ns.route('/check' )
@@ -440,7 +445,7 @@ def detect_id(client, imagedata, session_id, app_id):
     
     if "Id Cards" in names or "Document" in names:
         count = count + 1
-        if names['Id Cards'] < 90 or names['Document'] < 90:
+        if names['Id Cards'] < 90:
             return False
     
     if "Human" in names or "Person" in names:
